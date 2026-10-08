@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- Tema principale dell'app -->
+    <style name="Theme.TerraLink" parent="android:Theme.Material.Light.NoActionBar">
+    </style>
+
+    <!-- Tema della Splash Screen nativa -->
+    <style name="Theme.App.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">#0D2418</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="postSplashScreenTheme">@style/Theme.TerraLink</item>
+    </style>
+
+</resources>

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+        android:width="108dp"
+        android:height="108dp"
+        android:viewportWidth="108"
+        android:viewportHeight="108">
+
+    <!-- Foglia Principale (Smart Farm) -->
+    <path
+        android:fillColor="#2ECC71"
+        android:pathData="M54,28 C38,28 32,46 32,60 C32,72 41,80 54,80 C67,80 76,72 76,60 C76,46 70,28 54,28 Z" />
+
+    <!-- Linee Circuito IoT all'interno della foglia -->
+    <path
+        android:strokeColor="#0D2418"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M54,38 L54,72 M54,50 L42,42 M54,58 L66,50 M54,64 L44,60" />
+
+    <!-- Nodi sensore sui rami del circuito -->
+    <path
+        android:fillColor="#0D2418"
+        android:pathData="M42,42 A2.5,2.5 0 1,1 41.9,42 Z M66,50 A2.5,2.5 0 1,1 65.9,50 Z M44,60 A2.5,2.5 0 1,1 43.9,60 Z" />
+
+    <!-- Onde del segnale Wi-Fi / Connessione IoT in alto -->
+    <path
+        android:strokeColor="#A3E635"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M42,23 A16,16 0 0,1 66,23" />
+    <path
+        android:strokeColor="#A3E635"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M47,18 A10,10 0 0,1 61,18" />
+    <path
+        android:fillColor="#A3E635"
+        android:pathData="M54,13 A2,2 0 1,1 53.9,13 Z" />
+    </vector>

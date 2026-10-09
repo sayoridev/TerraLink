@@ -1,0 +1,607 @@
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <dht11.h>
+#include <analogWrite.h>
+#include <ESP32_Servo.h>
+#include <LiquidCrystal_I2C.h>
+#include "BuzzerMusic.h"
+
+// ==========================================
+// SENSORS - PIN ORIGINALI
+// ==========================================
+#define DHT11PIN        17
+#define RAINWATERPIN    35
+#define LIGHTPIN        34
+#define WATERLEVELPIN   33
+#define SOILHUMIDITYPIN 32
+
+// Sensori aggiuntivi
+#define PIRPIN          23
+#define ULTRASONIC_TRIG 12
+#define ULTRASONIC_ECHO 13
+#define BUTTONPIN       5
+
+// ==========================================
+// ACTUATORS
+// ==========================================
+#define LEDPIN          27
+#define RELAYPIN        25
+#define SERVOPIN        26
+#define FANPIN1         19
+#define FANPIN2         18
+#define BUZZERPIN       16
+
+// ==========================================
+// WIFI
+// Inserisci le tue credenziali localmente
+// ==========================================
+const char* ssid = "SSID";
+const char* pwd  = "PASSWORD";
+
+WiFiServer server(8080);
+
+// ==========================================
+// OBJECTS
+// ==========================================
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+dht11 DHT11;
+Servo myservo;
+
+// ==========================================
+// SENSOR VALUES
+// ==========================================
+int Temperature = 0;
+int Humidity = 0;
+int SoilHumidity = 0;
+int Light = 0;
+int WaterLevel = 0;
+int Rainwater = 0;
+
+int PIRState = 0;
+int DistanceCM = 0;
+int ButtonState = 0;
+int chk = -1;
+
+// Assumes lower analog readings mean wet.
+// Calibrate this threshold for your sensor.
+const int RAIN_THRESHOLD = 2000;
+
+// ==========================================
+// TCP COMMAND BUFFER
+// ==========================================
+String commandBuffer;
+String dataBuffer;
+unsigned long lastCommandByteAt = 0;
+
+const unsigned long COMMAND_IDLE_TIMEOUT = 150;
+
+// ==========================================
+// ACTUATOR STATES
+// ==========================================
+bool ledOn = false;
+bool fanOn = false;
+bool pumpOn = false;
+bool relayOn = false;
+bool buzzerOn = false;
+
+int servoAngle = 180;
+
+// ==========================================
+// NON-BLOCKING BUZZER MUSIC
+// ==========================================
+bool musicPlaying = false;
+int musicNoteIndex = 0;
+unsigned long nextMusicNoteAt = 0;
+
+// ==========================================
+// FUNCTION DECLARATIONS
+// ==========================================
+void getSensorsData();
+void handleCommand(String cmd);
+void readIncomingCommands(WiFiClient& client);
+
+void startMusic();
+void stopMusic();
+void updateMusic();
+
+int readUltrasonicCM();
+int readPercentage(int pin);
+
+String buildTelemetry();
+String dataHandle(int data);
+
+void updateLcd(String text);
+void setRelay(bool enabled);
+
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+  Serial.begin(9600);
+
+  // Wi-Fi
+  WiFi.begin(ssid, pwd);
+  Serial.println("Connecting to WiFi...");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("Connected to WiFi");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+
+  // LCD
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("TerraLink IoT");
+  lcd.setCursor(0, 1);
+  lcd.print(WiFi.localIP().toString());
+
+  // Analog sensors
+  pinMode(RAINWATERPIN, INPUT);
+  pinMode(LIGHTPIN, INPUT);
+  pinMode(SOILHUMIDITYPIN, INPUT);
+  pinMode(WATERLEVELPIN, INPUT);
+
+  // Additional sensors
+  pinMode(PIRPIN, INPUT);
+  pinMode(ULTRASONIC_TRIG, OUTPUT);
+  pinMode(ULTRASONIC_ECHO, INPUT);
+  digitalWrite(ULTRASONIC_TRIG, LOW);
+
+  pinMode(BUTTONPIN, INPUT_PULLUP);
+
+  // Actuators
+  pinMode(LEDPIN, OUTPUT);
+  pinMode(RELAYPIN, OUTPUT);
+  pinMode(FANPIN1, OUTPUT);
+  pinMode(FANPIN2, OUTPUT);
+  pinMode(BUZZERPIN, OUTPUT);
+
+  digitalWrite(LEDPIN, LOW);
+  digitalWrite(RELAYPIN, LOW);
+  digitalWrite(FANPIN1, LOW);
+  digitalWrite(FANPIN2, LOW);
+  digitalWrite(BUZZERPIN, LOW);
+
+  // Servo
+  myservo.attach(SERVOPIN);
+  myservo.write(servoAngle);
+
+  // TCP server
+  server.begin();
+  Serial.println("TCP server started on port 8080");
+}
+
+// ==========================================
+// MAIN LOOP
+// ==========================================
+void loop() {
+  WiFiClient client = server.available();
+
+  if (!client) {
+    updateMusic();
+    delay(10);
+    return;
+  }
+
+  Serial.println("New client connected");
+
+  commandBuffer = "";
+
+  while (client.connected()) {
+    readIncomingCommands(client);
+
+    getSensorsData();
+    updateMusic();
+
+    dataBuffer = buildTelemetry();
+    client.println(dataBuffer);
+
+    delay(500);
+  }
+
+  client.stop();
+  commandBuffer = "";
+
+  Serial.println("Client disconnected");
+}
+
+// ==========================================
+// READ TCP COMMANDS
+// Supports:
+//   newline-terminated text commands
+//   legacy commands: as, As, bs, Bs, cs, Cs, ds, Ds, es
+//   LCD: L:<text>s without newline
+// ==========================================
+bool isLegacyCommand(const String& cmd) {
+  return cmd == "as" || cmd == "As" ||
+         cmd == "bs" || cmd == "Bs" ||
+         cmd == "cs" || cmd == "Cs" ||
+         cmd == "ds" || cmd == "Ds" ||
+         cmd == "es";
+}
+
+void readIncomingCommands(WiFiClient& client) {
+  while (client.available()) {
+    char c = (char)client.read();
+    lastCommandByteAt = millis();
+
+    if (c == '\r') {
+      continue;
+    }
+
+    if (c == '\n') {
+      commandBuffer.trim();
+
+      if (commandBuffer.length() > 0) {
+        Serial.println("TCP command: " + commandBuffer);
+        handleCommand(commandBuffer);
+      }
+
+      commandBuffer = "";
+      continue;
+    }
+
+    commandBuffer += c;
+
+    // Prevent unlimited buffer growth.
+    if (commandBuffer.length() > 100) {
+      Serial.println("Command too long; discarded");
+      commandBuffer = "";
+      continue;
+    }
+
+    // Process complete legacy commands immediately.
+    // LCD commands are handled separately.
+    if (!commandBuffer.startsWith("L:") &&
+        isLegacyCommand(commandBuffer)) {
+      Serial.println("TCP legacy command: " + commandBuffer);
+      handleCommand(commandBuffer);
+      commandBuffer = "";
+    }
+  }
+
+  // Android's LCD translation sends L:<text>s without newline.
+  // Wait until the TCP stream becomes idle before processing it.
+  if (commandBuffer.startsWith("L:") &&
+      commandBuffer.length() >= 3 &&
+      millis() - lastCommandByteAt >= COMMAND_IDLE_TIMEOUT) {
+
+    String lcdCommand = commandBuffer;
+
+    // Remove the final protocol delimiter only.
+    // If the actual text ends in 's', the wire has 'ss',
+    // so removing one character preserves the user's text.
+    if (lcdCommand.endsWith("s")) {
+      lcdCommand.remove(lcdCommand.length() - 1);
+    }
+
+    Serial.println("TCP LCD command received");
+    handleCommand(lcdCommand);
+    commandBuffer = "";
+  }
+}
+
+// ==========================================
+// READ SENSORS
+// ==========================================
+void getSensorsData() {
+  chk = DHT11.read(DHT11PIN);
+
+  // Keep previous values if the DHT read fails.
+  if (chk == 0) {
+    Temperature = DHT11.temperature;
+    Humidity = DHT11.humidity;
+  }
+
+  SoilHumidity = readPercentage(SOILHUMIDITYPIN);
+  Light = readPercentage(LIGHTPIN);
+  WaterLevel = readPercentage(WATERLEVELPIN);
+
+  Rainwater = analogRead(RAINWATERPIN);
+  PIRState = digitalRead(PIRPIN);
+
+  DistanceCM = readUltrasonicCM();
+
+  // INPUT_PULLUP: pressed = LOW.
+  ButtonState = (digitalRead(BUTTONPIN) == LOW) ? 1 : 0;
+}
+
+// ==========================================
+// ANALOG SENSOR CONVERSION
+// ==========================================
+int readPercentage(int pin) {
+  int raw = analogRead(pin);
+  return constrain((raw * 100L) / 4095L, 0, 100);
+}
+
+// ==========================================
+// ULTRASONIC SENSOR
+// ==========================================
+int readUltrasonicCM() {
+  digitalWrite(ULTRASONIC_TRIG, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(ULTRASONIC_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(ULTRASONIC_TRIG, LOW);
+
+  unsigned long duration =
+      pulseIn(ULTRASONIC_ECHO, HIGH, 30000UL);
+
+  if (duration == 0) {
+    return 0;
+  }
+
+  return constrain((int)(duration / 58UL), 0, 255);
+}
+
+// ==========================================
+// BUILD TERRALINK TELEMETRY
+// ==========================================
+String buildTelemetry() {
+  String data;
+
+  data += "TEMP:" + String(Temperature);
+  data += ",HUM:" + String(Humidity);
+  data += ",SOIL:" + String(SoilHumidity);
+
+  data += ",RAIN:";
+  data += (Rainwater < RAIN_THRESHOLD) ? "true" : "false";
+
+  data += ",WATER:" + String(WaterLevel);
+  data += ",LIGHT:" + String(Light);
+
+  data += ",MOTION:";
+  data += (PIRState == HIGH) ? "true" : "false";
+
+  data += ",DISTANCE:" + String(DistanceCM);
+
+  data += ",BUTTON:";
+  data += ButtonState ? "true" : "false";
+
+  data += ",LED:";
+  data += ledOn ? "true" : "false";
+
+  data += ",FAN:";
+  data += fanOn ? "true" : "false";
+
+  data += ",PUMP:";
+  data += pumpOn ? "true" : "false";
+
+  data += ",RELAY:";
+  data += relayOn ? "true" : "false";
+
+  data += ",BUZZER:";
+  data += buzzerOn ? "true" : "false";
+
+  data += ",SERVO:" + String(servoAngle);
+
+  return data;
+}
+
+// ==========================================
+// RELAY / PUMP
+// Both controls use the same physical relay.
+// ==========================================
+void setRelay(bool enabled) {
+  pumpOn = enabled;
+  relayOn = enabled;
+
+  digitalWrite(RELAYPIN, enabled ? HIGH : LOW);
+}
+
+// ==========================================
+// LCD DISPLAY
+// 16 columns x 2 rows
+// ==========================================
+void updateLcd(String text) {
+  text = text.substring(0, 32);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+
+  int firstLineLength = min((int)text.length(), 16);
+
+  lcd.print(text.substring(0, firstLineLength));
+
+  if (text.length() > 16) {
+    lcd.setCursor(0, 1);
+
+    int secondLineLength = min((int)text.length(), 32);
+    lcd.print(text.substring(16, secondLineLength));
+  }
+}
+
+// ==========================================
+// COMMAND HANDLING
+// ==========================================
+void handleCommand(String cmd) {
+  cmd.trim();
+
+  String upper = cmd;
+  upper.toUpperCase();
+
+  Serial.println("Handling command: " + cmd);
+
+  // --------------------------
+  // LED
+  // App legacy commands: as / As
+  // --------------------------
+  if (cmd == "as" || cmd == "a" || upper == "LED:ON") {
+    ledOn = true;
+    digitalWrite(LEDPIN, HIGH);
+  }
+  else if (cmd == "As" || cmd == "A" || upper == "LED:OFF") {
+    ledOn = false;
+    digitalWrite(LEDPIN, LOW);
+  }
+
+  // --------------------------
+  // PUMP / RELAY
+  // App maps both to bs / Bs
+  // --------------------------
+  else if (cmd == "bs" || cmd == "b" ||
+           upper == "PUMP:ON" ||
+           upper == "RELAY:ON" ||
+           upper == "IRRIGATION") {
+    setRelay(true);
+  }
+  else if (cmd == "Bs" || cmd == "B" ||
+           upper == "PUMP:OFF" ||
+           upper == "RELAY:OFF") {
+    setRelay(false);
+  }
+
+  // --------------------------
+  // FAN
+  // --------------------------
+  else if (cmd == "cs" || cmd == "c" || upper == "FAN:ON") {
+    fanOn = true;
+    digitalWrite(FANPIN1, HIGH);
+    digitalWrite(FANPIN2, LOW);
+  }
+  else if (cmd == "Cs" || cmd == "C" || upper == "FAN:OFF") {
+    fanOn = false;
+    digitalWrite(FANPIN1, LOW);
+    digitalWrite(FANPIN2, LOW);
+  }
+
+  // --------------------------
+  // SERVO
+  // The app maps 180 / OPEN to ds
+  // and 80 / CLOSE to Ds.
+  // Other slider angles may arrive as SERVO:<angle>.
+  // --------------------------
+  else if (cmd == "ds" || cmd == "d" ||
+           upper == "SERVO:OPEN" ||
+           upper == "SERVO:180") {
+    servoAngle = 180;
+    myservo.write(servoAngle);
+  }
+  else if (cmd == "Ds" || cmd == "D" ||
+           upper == "SERVO:CLOSE" ||
+           upper == "SERVO:80") {
+    servoAngle = 80;
+    myservo.write(servoAngle);
+  }
+  else if (upper.startsWith("SERVO:")) {
+    String angleText = cmd.substring(6);
+    angleText.trim();
+
+    bool validNumber = angleText.length() > 0;
+
+    for (unsigned int i = 0; i < angleText.length(); i++) {
+      if (!isDigit(angleText[i])) {
+        validNumber = false;
+        break;
+      }
+    }
+
+    if (validNumber) {
+      servoAngle = constrain(angleText.toInt(), 0, 180);
+      myservo.write(servoAngle);
+    }
+  }
+
+  // --------------------------
+  // BUZZER
+  // Legacy es starts the melody.
+  // --------------------------
+  else if (cmd == "es" || cmd == "e" ||
+           upper == "BUZZER:ON" ||
+           upper == "BUZZER:PLAY" ||
+           upper == "MUSIC") {
+    startMusic();
+  }
+  else if (upper == "BUZZER:OFF") {
+    stopMusic();
+  }
+
+  // --------------------------
+  // LCD
+  // Legacy L:<text> and text LCD:<text>
+  // --------------------------
+  else if (cmd.startsWith("L:")) {
+    updateLcd(cmd.substring(2));
+  }
+  else if (upper.startsWith("LCD:")) {
+    updateLcd(cmd.substring(4));
+  }
+
+  else {
+    Serial.println("Unknown command: " + cmd);
+  }
+}
+
+// ==========================================
+// NON-BLOCKING BUZZER MUSIC
+// Uses melody2 and noteDurations2 from BuzzerMusic.h
+// ==========================================
+void startMusic() {
+  if (musicPlaying) {
+    return;
+  }
+
+  musicPlaying = true;
+  buzzerOn = true;
+  musicNoteIndex = 0;
+  nextMusicNoteAt = 0;
+}
+
+void stopMusic() {
+  musicPlaying = false;
+  buzzerOn = false;
+
+  noTone(BUZZERPIN);
+  digitalWrite(BUZZERPIN, LOW);
+}
+
+void updateMusic() {
+  if (!musicPlaying || millis() < nextMusicNoteAt) {
+    return;
+  }
+
+  while (musicNoteIndex < 98 &&
+         noteDurations2[musicNoteIndex] == 0) {
+    musicNoteIndex++;
+  }
+
+  if (musicNoteIndex >= 98) {
+    stopMusic();
+    return;
+  }
+
+  int noteDuration = 700 / noteDurations2[musicNoteIndex];
+
+  tone(
+      BUZZERPIN,
+      melody2[musicNoteIndex],
+      noteDuration
+  );
+
+  nextMusicNoteAt =
+      millis() + (unsigned long)(noteDuration * 1.30);
+
+  musicNoteIndex++;
+}
+
+// ==========================================
+// ORIGINAL HEX HELPER
+// ==========================================
+String dataHandle(int data) {
+  int percentage = (data / 4095.0) * 100;
+  percentage = constrain(percentage, 0, 100);
+
+  char hexString[3];
+  snprintf(hexString, sizeof(hexString), "%02X", percentage);
+
+  return String(hexString);
+}
